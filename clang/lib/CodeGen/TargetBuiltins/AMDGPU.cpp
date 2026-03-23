@@ -20,6 +20,7 @@
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/IR/IntrinsicsAMDGPU.h"
 #include "llvm/IR/IntrinsicsR600.h"
+#include "llvm/IR/IntrinsicsSPIRV.h"
 #include "llvm/IR/MemoryModelRelaxationAnnotations.h"
 #include "llvm/Support/AMDGPUAddrSpace.h"
 #include "llvm/Support/AtomicOrdering.h"
@@ -198,6 +199,12 @@ static Value *emitAMDGPUWorkGroupSizeV4(CodeGenFunction &CGF, unsigned Index) {
 ///            and use its value for COV_4 or COV_5+ approach. It is used for
 ///            compiling device libraries in an ABI-agnostic way.
 Value *EmitAMDGPUWorkGroupSize(CodeGenFunction &CGF, unsigned Index) {
+  if (CGF.getTarget().getTriple().isSPIRV()) {
+    return CGF.Builder.CreateIntrinsic(CGF.Int32Ty,
+                                       Intrinsic::spv_workgroup_size,
+                                       {ConstantInt::get(CGF.Int32Ty, Index)});
+  }
+
   auto Cov = CGF.getTarget().getTargetOpts().CodeObjectVersion;
 
   // Do not emit __oclc_ABI_version references with non-empt environment.
