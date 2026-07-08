@@ -580,11 +580,13 @@ bool SPIRVCallLowering::lowerCall(MachineIRBuilder &MIRBuilder,
         // pointee type.
         MRI->setRegClass(ArgReg, SpvType ? GR->getRegClass(SpvType)
                                          : &SPIRV::pIDRegClass);
-        MRI->setType(
-            ArgReg,
-            SpvType ? GR->getRegType(SpvType)
-                    : LLT::pointer(cast<PointerType>(Arg.Ty)->getAddressSpace(),
-                                   GR->getPointerSize()));
+        if (!MRI->getType(ArgReg).isValid())
+          MRI->setType(
+              ArgReg,
+              SpvType
+                  ? GR->getRegType(SpvType)
+                  : LLT::pointer(cast<PointerType>(Arg.Ty)->getAddressSpace(),
+                                 GR->getPointerSize()));
       }
     }
     if (auto Res = SPIRV::lowerBuiltin(
