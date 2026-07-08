@@ -395,9 +395,7 @@ Register SPIRVGlobalRegistry::createConstFP(const ConstantFP *CF,
           MIB = MIRBuilder.buildInstr(SPIRV::OpConstantF)
                     .addDef(Res)
                     .addUse(getSPIRVTypeID(SpvType));
-          addNumImm(APInt(BitWidth,
-                          CF->getValueAPF().bitcastToAPInt().getZExtValue()),
-                    MIB);
+          addNumImm(CF->getValueAPF().bitcastToAPInt(), MIB);
         }
         const auto &ST = CurMF->getSubtarget();
         constrainSelectedInstRegOperands(*MIB, *ST.getInstrInfo(),
