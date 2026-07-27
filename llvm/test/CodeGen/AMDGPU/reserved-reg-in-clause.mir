@@ -10,6 +10,9 @@ body:             |
     ; GCN-LABEL: name: long_reg_clause
     ; GCN-NOT: BUNDLE
     ; GCN-NOT: early-clobber
+    ; The clause only extends the live range of the pointer, so the KILL
+    ; carries no subregister operands and cannot name an odd subreg.
+    ; GCN: KILL %0{{$}}
     ; GCN-NOT: KILL
     %0:vreg_64_align2 = IMPLICIT_DEF
     undef %1.sub12_sub13_sub14_sub15:areg_512_align2 = GLOBAL_LOAD_DWORDX4 %0, -208, 0, implicit $exec

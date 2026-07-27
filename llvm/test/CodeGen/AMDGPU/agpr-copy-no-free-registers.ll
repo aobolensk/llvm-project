@@ -626,6 +626,7 @@ define amdgpu_kernel void @introduced_copy_to_sgpr(i64 %arg, i32 %arg1, i32 %arg
 ; GFX908-NEXT:    s_waitcnt vmcnt(0)
 ; GFX908-NEXT:    ds_read_b64 v[12:13], v17
 ; GFX908-NEXT:    ds_read_b64 v[14:15], v0
+; GFX908-NEXT:    ; kill: killed $sgpr22 killed $sgpr23
 ; GFX908-NEXT:    s_and_b64 s[22:23], s[20:21], exec
 ; GFX908-NEXT:    s_cselect_b32 s22, 1, 0
 ; GFX908-NEXT:    s_cmp_lg_u32 s22, 1

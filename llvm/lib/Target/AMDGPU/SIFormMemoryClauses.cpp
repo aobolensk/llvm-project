@@ -199,22 +199,19 @@ bool SIFormMemoryClausesImpl::checkPressure(const MachineInstr &MI,
       *ST,
       MI.getMF()->getInfo<SIMachineFunctionInfo>()->getDynamicVGPRBlockSize());
 
-  // Don't push over half the register budget. We don't want to introduce
-  // spilling just to form a soft clause.
-  //
-  // FIXME: This pressure check is fundamentally broken. First, this is checking
-  // the global pressure, not the pressure at this specific point in the
-  // program. Second, it's not accounting for the increased liveness of the use
-  // operands due to the early clobber we will introduce. Third, the pressure
-  // tracking does not account for the alignment requirements for SGPRs, or the
-  // fragmentation of registers the allocator will need to satisfy.
-  if (Occupancy >= MFI->getMinAllowedOccupancy() &&
-      MaxPressure.getVGPRNum(ST->hasGFX90AInsts()) <= MaxVGPRs / 2 &&
-      MaxPressure.getSGPRNum() <= MaxSGPRs / 2) {
-    LastRecordedOccupancy = Occupancy;
-    return true;
-  }
-  return false;
+  // Reject once occupancy would drop below the function minimum.
+  if (Occupancy < MFI->getMinAllowedOccupancy())
+    return false;
+
+  // Backstop against the unified VGPR/AGPR file on gfx90a, where AGPRs let
+  // getVGPRNum() report up to 2x MaxVGPRs.
+  unsigned VGPRBudget = ST->hasGFX90AInsts() ? 2 * MaxVGPRs : MaxVGPRs;
+  if (MaxPressure.getVGPRNum(ST->hasGFX90AInsts()) > VGPRBudget ||
+      MaxPressure.getSGPRNum() > MaxSGPRs)
+    return false;
+
+  LastRecordedOccupancy = Occupancy;
+  return true;
 }
 
 // Collect register defs and uses along with their lane masks and states.

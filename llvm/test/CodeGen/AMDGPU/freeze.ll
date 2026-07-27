@@ -5013,8 +5013,7 @@ define void @freeze_v30i32(ptr addrspace(1) %ptra, ptr addrspace(1) %ptrb) {
 ; GFX9-GISEL-NEXT:    global_load_dwordx4 v[20:23], v[0:1], off offset:64
 ; GFX9-GISEL-NEXT:    global_load_dwordx4 v[24:27], v[0:1], off offset:80
 ; GFX9-GISEL-NEXT:    global_load_dwordx4 v[28:31], v[0:1], off offset:96
-; GFX9-GISEL-NEXT:    s_nop 0
-; GFX9-GISEL-NEXT:    global_load_dwordx2 v[0:1], v[0:1], off offset:112
+; GFX9-GISEL-NEXT:    global_load_dwordx2 v[32:33], v[0:1], off offset:112
 ; GFX9-GISEL-NEXT:    s_waitcnt vmcnt(7)
 ; GFX9-GISEL-NEXT:    global_store_dwordx4 v[2:3], v[4:7], off
 ; GFX9-GISEL-NEXT:    s_waitcnt vmcnt(7)
@@ -5030,7 +5029,7 @@ define void @freeze_v30i32(ptr addrspace(1) %ptra, ptr addrspace(1) %ptrb) {
 ; GFX9-GISEL-NEXT:    s_waitcnt vmcnt(7)
 ; GFX9-GISEL-NEXT:    global_store_dwordx4 v[2:3], v[28:31], off offset:96
 ; GFX9-GISEL-NEXT:    s_waitcnt vmcnt(7)
-; GFX9-GISEL-NEXT:    global_store_dwordx2 v[2:3], v[0:1], off offset:112
+; GFX9-GISEL-NEXT:    global_store_dwordx2 v[2:3], v[32:33], off offset:112
 ; GFX9-GISEL-NEXT:    s_waitcnt vmcnt(0)
 ; GFX9-GISEL-NEXT:    s_setpc_b64 s[30:31]
 ;
