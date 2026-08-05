@@ -780,6 +780,174 @@ bool GCNSchedStrategy::tryPendingCandidate(SchedCandidate &Cand,
   return false;
 }
 
+bool GCNMaxOccupancySchedStrategy::tryCandidate(SchedCandidate &Cand,
+                                                SchedCandidate &TryCand,
+                                                SchedBoundary *Zone) const {
+  // Initialize the candidate if needed.
+  if (!Cand.isValid()) {
+    TryCand.Reason = FirstValid;
+    return true;
+  }
+
+  // Bias PhysReg Defs and copies to their uses and defined respectively.
+  if (tryBiasPhysRegs(TryCand, Cand, Zone, RegionPolicy.BiasPRegsExtra))
+    return TryCand.Reason != NoCand;
+
+  // Avoid exceeding the target's limit.
+  if (DAG->isTrackingPressure() &&
+      tryPressure(TryCand.RPDelta.Excess, Cand.RPDelta.Excess, TryCand, Cand,
+                  RegExcess, TRI, DAG->MF))
+    return TryCand.Reason != NoCand;
+
+  // Avoid increasing the max critical pressure in the scheduled region.
+  if (DAG->isTrackingPressure() &&
+      tryPressure(TryCand.RPDelta.CriticalMax, Cand.RPDelta.CriticalMax,
+                  TryCand, Cand, RegCritical, TRI, DAG->MF))
+    return TryCand.Reason != NoCand;
+
+  // We only compare a subset of features when comparing nodes between Top and
+  // Bottom boundary. Skip heuristics that are more tie-breaking in nature.
+  bool SameBoundary = Zone != nullptr;
+
+  // Below the limits both pressure checks above are silent: initCandidate only
+  // fills Excess/CriticalMax once a candidate is at or past a limit, so the
+  // policy has no pressure information at all there. Estimate the live-register
+  // gradient of a candidate from the cached per-instruction PressureDiff: how
+  // many VGPRs (AGPRs included) and SGPRs go live (positive) or die (negative)
+  // if it is scheduled next. PressureDiff is recorded bottom-up, so the sign is
+  // inverted for top-zone candidates, exactly as initCandidate does.
+  auto liveRegDelta = [&](const SchedCandidate &C, int &VGPRs, int &SGPRs) {
+    VGPRs = 0;
+    SGPRs = 0;
+    if (!C.SU || !C.SU->isInstr())
+      return;
+    for (const auto &Diff : DAG->getPressureDiff(C.SU)) {
+      if (!Diff.isValid())
+        break;
+      int Inc = C.AtTop ? -Diff.getUnitInc() : Diff.getUnitInc();
+      unsigned PSet = Diff.getPSet();
+      if (PSet ==
+              static_cast<unsigned>(AMDGPU::RegisterPressureSets::VGPR_32) ||
+          PSet == static_cast<unsigned>(AMDGPU::RegisterPressureSets::AGPR_32))
+        VGPRs += Inc;
+      else if (PSet ==
+               static_cast<unsigned>(AMDGPU::RegisterPressureSets::SReg_32))
+        SGPRs += Inc;
+    }
+  };
+
+  auto clampVal = [](int V, int Lim) {
+    return V < -Lim ? -Lim : (V > Lim ? Lim : V);
+  };
+  // One integer, smaller is better. The VGPR field is clamped to the width of
+  // the widest common vector operand on this target, so freeing a whole wide
+  // vector outranks freeing a single register while larger differences are
+  // left to the exact test further down. The VGPR field is scaled by the full
+  // width of the SGPR field, so the scalar term can only break ties.
+  auto gradKey = [&](int V, int S) {
+    return clampVal(V, 8) * 5 + clampVal(S, 2);
+  };
+
+  int TryVGPRs = 0, TrySGPRs = 0, CandVGPRs = 0, CandSGPRs = 0;
+  // Gated on same-boundary: comparing gradient magnitudes across Top and Bot
+  // is what the generic code refuses to do for pressure, and doing it here
+  // caused a new spill.
+  bool UseGradient = DAG->isTrackingPressure() && SameBoundary;
+  // At or past a limit there is already a real pressure signal, so the exact
+  // gradient runs here instead of the clamped key (and the late test is off).
+  bool NearLimit = TryCand.RPDelta.Excess.isValid() ||
+                   Cand.RPDelta.Excess.isValid() ||
+                   TryCand.RPDelta.CriticalMax.isValid() ||
+                   Cand.RPDelta.CriticalMax.isValid();
+  if (UseGradient) {
+    liveRegDelta(TryCand, TryVGPRs, TrySGPRs);
+    liveRegDelta(Cand, CandVGPRs, CandSGPRs);
+    if (NearLimit) {
+      if (tryLess(TryVGPRs, CandVGPRs, TryCand, Cand, RegCritical))
+        return TryCand.Reason != NoCand;
+      if (tryLess(TrySGPRs, CandSGPRs, TryCand, Cand, RegCritical))
+        return TryCand.Reason != NoCand;
+    } else if (tryLess(gradKey(TryVGPRs, TrySGPRs),
+                       gradKey(CandVGPRs, CandSGPRs), TryCand, Cand,
+                       RegCritical)) {
+      return TryCand.Reason != NoCand;
+    }
+  }
+
+  if (SameBoundary) {
+    // For loops that are acyclic path limited, aggressively schedule for
+    // latency. Within a single cycle, whenever CurrMOps > 0, allow normal
+    // heuristics to take precedence.
+    if (Rem.IsAcyclicLatencyLimited && !Zone->getCurrMOps() &&
+        tryLatency(TryCand, Cand, *Zone))
+      return TryCand.Reason != NoCand;
+
+    // Prioritize instructions that read unbuffered resources by stall cycles.
+    if (tryLess(Zone->getLatencyStallCycles(TryCand.SU),
+                Zone->getLatencyStallCycles(Cand.SU), TryCand, Cand, Stall))
+      return TryCand.Reason != NoCand;
+  }
+
+  // Keep clustered nodes together to encourage downstream peephole
+  // optimizations which may reduce resource requirements.
+  unsigned CandZoneCluster = Cand.AtTop ? TopClusterID : BotClusterID;
+  unsigned TryCandZoneCluster = TryCand.AtTop ? TopClusterID : BotClusterID;
+  bool CandIsClusterSucc =
+      isTheSameCluster(CandZoneCluster, Cand.SU->ParentClusterIdx);
+  bool TryCandIsClusterSucc =
+      isTheSameCluster(TryCandZoneCluster, TryCand.SU->ParentClusterIdx);
+  if (tryGreater(TryCandIsClusterSucc, CandIsClusterSucc, TryCand, Cand,
+                 Cluster))
+    return TryCand.Reason != NoCand;
+
+  if (SameBoundary) {
+    // Weak edges are for clustering and other constraints.
+    if (tryLess(getWeakLeft(TryCand.SU, TryCand.AtTop),
+                getWeakLeft(Cand.SU, Cand.AtTop), TryCand, Cand, Weak))
+      return TryCand.Reason != NoCand;
+  }
+
+  // The generic region-max pressure check belongs here, but initCandidate in
+  // this file never fills RPDelta.CurrentMax, so it always compares two
+  // invalid values and can never decide anything. Use its slot for the exact
+  // live-register gradient: VGPRs decide occupancy on this target, SGPRs are
+  // only a further tie-break. Candidates whose clamped keys tied above are
+  // therefore ordered by clustering and stall avoidance first, and the exact
+  // magnitude only outranks resource balancing, latency and program order.
+  if (UseGradient && !NearLimit) {
+    if (tryLess(TryVGPRs, CandVGPRs, TryCand, Cand, RegMax))
+      return TryCand.Reason != NoCand;
+    if (tryLess(TrySGPRs, CandSGPRs, TryCand, Cand, RegMax))
+      return TryCand.Reason != NoCand;
+  }
+
+  if (SameBoundary) {
+    // Avoid critical resource consumption and balance the schedule.
+    TryCand.initResourceDelta(DAG, SchedModel);
+    if (tryLess(TryCand.ResDelta.CritResources, Cand.ResDelta.CritResources,
+                TryCand, Cand, ResourceReduce))
+      return TryCand.Reason != NoCand;
+    if (tryGreater(TryCand.ResDelta.DemandedResources,
+                   Cand.ResDelta.DemandedResources, TryCand, Cand,
+                   ResourceDemand))
+      return TryCand.Reason != NoCand;
+
+    // Avoid serializing long latency dependence chains.
+    if (!RegionPolicy.DisableLatencyHeuristic && TryCand.Policy.ReduceLatency &&
+        !Rem.IsAcyclicLatencyLimited && tryLatency(TryCand, Cand, *Zone))
+      return TryCand.Reason != NoCand;
+
+    // Fall through to original instruction order.
+    if ((Zone->isTop() && TryCand.SU->NodeNum < Cand.SU->NodeNum) ||
+        (!Zone->isTop() && TryCand.SU->NodeNum > Cand.SU->NodeNum)) {
+      TryCand.Reason = NodeOrder;
+      return true;
+    }
+  }
+
+  return false;
+}
+
 GCNMaxOccupancySchedStrategy::GCNMaxOccupancySchedStrategy(
     const MachineSchedContext *C, bool IsLegacyScheduler)
     : GCNSchedStrategy(C) {

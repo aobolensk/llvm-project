@@ -173,6 +173,10 @@ public:
 /// The goal of this scheduling strategy is to maximize kernel occupancy (i.e.
 /// maximum number of waves per simd).
 class GCNMaxOccupancySchedStrategy final : public GCNSchedStrategy {
+protected:
+  bool tryCandidate(SchedCandidate &Cand, SchedCandidate &TryCand,
+                    SchedBoundary *Zone) const override;
+
 public:
   GCNMaxOccupancySchedStrategy(const MachineSchedContext *C,
                                bool IsLegacyScheduler = false);
