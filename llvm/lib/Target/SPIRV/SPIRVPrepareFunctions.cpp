@@ -449,6 +449,8 @@ static bool toSpvLifetimeIntrinsic(IntrinsicInst *II, Intrinsic::ID NewID) {
 static void
 lowerConstrainedFmuladd(IntrinsicInst *II,
                         SmallVector<Instruction *> &EraseFromParent) {
+  // SPIR-V always prefers fused multiply-add,
+  // so fmuladd can always fuse into the already-correct constrained.fma path.
   auto *FPI = cast<ConstrainedFPIntrinsic>(II);
   Value *A = FPI->getArgOperand(0);
   Value *Mul = FPI->getArgOperand(1);
@@ -456,10 +458,10 @@ lowerConstrainedFmuladd(IntrinsicInst *II,
   IRBuilder<> Builder(II->getParent());
   Builder.SetInsertPoint(II);
   std::optional<RoundingMode> Rounding = FPI->getRoundingMode();
-  Value *Product = Builder.CreateFMul(A, Mul, II->getName() + ".mul");
-  Value *Result = Builder.CreateConstrainedFPBinOp(
-      Intrinsic::experimental_constrained_fadd, Product, Add, {},
-      II->getName() + ".add", nullptr, Rounding);
+  std::optional<fp::ExceptionBehavior> Except = FPI->getExceptionBehavior();
+  Value *Result = Builder.CreateConstrainedFPIntrinsic(
+      Intrinsic::experimental_constrained_fma, {II->getType()}, {A, Mul, Add},
+      {}, II->getName() + ".fma", nullptr, Rounding, Except);
   II->replaceAllUsesWith(Result);
   EraseFromParent.push_back(II);
 }
