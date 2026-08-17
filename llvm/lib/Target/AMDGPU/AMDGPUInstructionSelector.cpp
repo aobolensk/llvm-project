@@ -3724,6 +3724,10 @@ Register AMDGPUInstructionSelector::matchSignExtendFromS32(Register Reg) const {
   if (mi_match(Reg, *MRI, m_GSExt(m_Reg(SExtSrc))))
     return MRI->getType(SExtSrc) == LLT::scalar(32) ? SExtSrc : Register();
 
+  // A zero extend is a sign extend if the source sign bit is known zero.
+  if (Register ZExtSrc = matchZeroExtendFromS32(Reg))
+    return VT->signBitIsZero(ZExtSrc) ? ZExtSrc : Register();
+
   // Match legalized form %sext = G_MERGE_VALUES (s32 %x), G_ASHR((S32 %x, 31))
   const MachineInstr *Def = getDefIgnoringCopies(Reg, *MRI);
   if (Def->getOpcode() != AMDGPU::G_MERGE_VALUES)
@@ -3735,9 +3739,6 @@ Register AMDGPUInstructionSelector::matchSignExtendFromS32(Register Reg) const {
                m_GAShr(m_SpecificReg(Def->getOperand(1).getReg()),
                        m_SpecificICst(31))))
     return Def->getOperand(1).getReg();
-
-  if (VT->signBitIsZero(Reg))
-    return matchZeroExtendFromS32(Reg);
 
   return Register();
 }
