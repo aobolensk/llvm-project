@@ -1218,16 +1218,25 @@ bool AMDGPUCoExecSchedStrategy::tryCandidateCoexec(SchedCandidate &Cand,
       return TryCand.Reason != NoCand;
 
     Heurs.sortHWUIResources();
-    if (Heurs.tryCriticalResource(TryCand, Cand, Zone)) {
-      LastAMDGPUReason = AMDGPUSchedReason::CritResourceBalance;
-      return TryCand.Reason != NoCand;
-    }
-
+    // Prefer deps of prioritized-unit consumers: they reuse live values.
     if (Heurs.tryCriticalResourceDependency(TryCand, Cand, Zone)) {
       LastAMDGPUReason = AMDGPUSchedReason::CritResourceDep;
       return TryCand.Reason != NoCand;
     }
+
+    if (Heurs.tryCriticalResource(TryCand, Cand, Zone)) {
+      LastAMDGPUReason = AMDGPUSchedReason::CritResourceBalance;
+      return TryCand.Reason != NoCand;
+    }
   }
+
+  // Avoid increasing the max critical pressure in the scheduled region.
+  // Ordered after the coexec heuristics: unlike Excess this is not a cliff,
+  // and gating on it early suppresses coexecution window fill.
+  if (DAG->isTrackingPressure() &&
+      tryPressure(TryCand.RPDelta.CriticalMax, Cand.RPDelta.CriticalMax,
+                  TryCand, Cand, RegCritical, TRI, DAG->MF))
+    return TryCand.Reason != NoCand;
 
   // Keep clustered nodes together to encourage downstream peephole
   // optimizations which may reduce resource requirements.
