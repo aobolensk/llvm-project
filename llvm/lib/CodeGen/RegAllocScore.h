@@ -65,10 +65,13 @@ RegAllocScore calculateRegAllocScore(const MachineFunction &MF,
                                      const MachineBlockFrequencyInfo &MBFI);
 
 /// Implementation of the above, which is also more easily unittestable.
+/// If WidthUnitBits is nonzero, copies, loads and stores are weighted by their
+/// width in units of WidthUnitBits bits.
 LLVM_ABI_FOR_TEST RegAllocScore calculateRegAllocScore(
     const MachineFunction &MF,
     llvm::function_ref<double(const MachineBasicBlock &)> GetBBFreq,
-    llvm::function_ref<bool(const MachineInstr &)> IsTriviallyRematerializable);
+    llvm::function_ref<bool(const MachineInstr &)> IsTriviallyRematerializable,
+    unsigned WidthUnitBits = 0);
 } // end namespace llvm
 
 #endif // LLVM_CODEGEN_REGALLOCSCORE_H_

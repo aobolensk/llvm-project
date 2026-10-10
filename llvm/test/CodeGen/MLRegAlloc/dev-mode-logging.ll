@@ -16,6 +16,13 @@
 ; RUN: %python %S/../../../lib/Analysis/models/log_reader.py %t4 > %t4.readable
 ; RUN: diff %t1.readable %t4.readable
 
+; Width weighting changes the reward.
+; RUN: llc -o /dev/null -mtriple=x86_64-linux-unknown -regalloc=greedy \
+; RUN:   -regalloc-enable-advisor=development -regalloc-score-width-unit=32 \
+; RUN:   -regalloc-training-log=%t5 < %S/Inputs/input.ll
+; RUN: %python %S/../../../lib/Analysis/models/log_reader.py %t5 > %t5.readable
+; RUN: FileCheck --input-file %t5.readable %s --check-prefix=WIDTH
+
 ; RUN: rm -rf %t_savedmodel %t
 ; RUN: %python %S/../../../lib/Analysis/models/gen-regalloc-eviction-test-model.py %t_savedmodel
 ; RUN: %python %S/../../../lib/Analysis/models/saved-model-to-tflite.py %t_savedmodel %t
@@ -42,6 +49,9 @@
 ; ML:      observation: 80
 ; ML: reward: 38.90
 ; NOML: reward: 37.60
+
+; WIDTH-LABEL: context: SyFgets
+; WIDTH: reward: 57.96
 
 
 ; CHECK-TWO-FCTS: context: SyFgets
