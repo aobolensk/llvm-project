@@ -183,4 +183,67 @@ TEST(RegAllocScoreTest, Counts) {
 
   );
 }
+
+TEST(RegAllocScoreTest, WidthWeighted) {
+  LLVMContext Ctx;
+  Module Mod("Module", Ctx);
+  auto MF = createMachineFunction(Ctx, Mod);
+
+  auto *MBB = MF->CreateMachineBasicBlock();
+  MF->insert(MF->end(), MBB);
+  const double Freq = 0.5;
+  auto MBBFreqMock = [&](const MachineBasicBlock &) { return Freq; };
+  auto WithMemOp = [&](MachineInstr *MI, MachineMemOperand::Flags Flags,
+                       LocationSize Size) {
+    MI->addMemOperand(*MF, MF->getMachineMemOperand(MachinePointerInfo(), Flags,
+                                                    Size, Align(4)));
+    return MI;
+  };
+  auto AddLoad = [&](LocationSize Size) {
+    MBB->push_back(
+        WithMemOp(createMockLoad(*MF), MachineMemOperand::MOLoad, Size));
+  };
+  AddLoad(LocationSize::precise(64));
+  AddLoad(LocationSize::precise(8));
+  AddLoad(LocationSize::precise(6));
+  MBB->push_back(createMockLoad(*MF));
+  AddLoad(LocationSize::precise(TypeSize::getScalable(64)));
+  AddLoad(LocationSize::beforeOrAfterPointer());
+  MBB->push_back(WithMemOp(createMockStore(*MF), MachineMemOperand::MOStore,
+                           LocationSize::precise(16)));
+  auto *LoadStore =
+      WithMemOp(createMockLoadStore(*MF), MachineMemOperand::MOLoad,
+                LocationSize::precise(8));
+  MBB->push_back(WithMemOp(LoadStore, MachineMemOperand::MOStore,
+                           LocationSize::precise(8)));
+  auto *Copy = createMockCopy(*MF);
+  Copy->addOperand(
+      *MF, MachineOperand::CreateReg(
+               MF->getRegInfo().createGenericVirtualRegister(LLT::scalar(128)),
+               /*isDef=*/true));
+  MBB->push_back(Copy);
+  auto *ExpensiveRemat =
+      WithMemOp(createMockExpensiveRemat(*MF), MachineMemOperand::MOLoad,
+                LocationSize::precise(64));
+  MBB->push_back(ExpensiveRemat);
+  auto IsRemat = [&](const MachineInstr &MI) { return &MI == ExpensiveRemat; };
+
+  const auto Weighted =
+      llvm::calculateRegAllocScore(*MF, MBBFreqMock, IsRemat, 32);
+  ASSERT_DOUBLE_EQ(4.0 * Freq, Weighted.copyCounts());
+  ASSERT_DOUBLE_EQ((16.0 + 2.0 + 2.0 + 1.0 + 1.0 + 1.0) * Freq,
+                   Weighted.loadCounts());
+  ASSERT_DOUBLE_EQ(4.0 * Freq, Weighted.storeCounts());
+  ASSERT_DOUBLE_EQ(2.0 * Freq, Weighted.loadStoreCounts());
+  ASSERT_DOUBLE_EQ(0.0, Weighted.cheapRematCounts());
+  ASSERT_DOUBLE_EQ(Freq, Weighted.expensiveRematCounts());
+
+  const auto Unweighted =
+      llvm::calculateRegAllocScore(*MF, MBBFreqMock, IsRemat, 0);
+  ASSERT_DOUBLE_EQ(Freq, Unweighted.copyCounts());
+  ASSERT_DOUBLE_EQ(6.0 * Freq, Unweighted.loadCounts());
+  ASSERT_DOUBLE_EQ(Freq, Unweighted.storeCounts());
+  ASSERT_DOUBLE_EQ(Freq, Unweighted.loadStoreCounts());
+  ASSERT_DOUBLE_EQ(Freq, Unweighted.expensiveRematCounts());
+}
 } // end namespace

@@ -17,7 +17,9 @@
 #include "llvm/CodeGen/MachineBlockFrequencyInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstr.h"
+#include "llvm/CodeGen/MachineMemOperand.h"
 #include "llvm/CodeGen/TargetInstrInfo.h"
+#include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/CodeGen/TargetSubtargetInfo.h"
 #include "llvm/MC/MCInstrDesc.h"
 #include "llvm/Support/CommandLine.h"
@@ -34,6 +36,10 @@ static cl::opt<double> CheapRematWeight("regalloc-cheap-remat-weight",
                                         cl::init(0.2), cl::Hidden);
 static cl::opt<double> ExpensiveRematWeight("regalloc-expensive-remat-weight",
                                             cl::init(1.0), cl::Hidden);
+static cl::opt<unsigned> WidthUnit(
+    "regalloc-score-width-unit", cl::init(0), cl::Hidden,
+    cl::desc("If nonzero, weight copies, loads and stores by their width in "
+             "units of this many bits"));
 
 #define DEBUG_TYPE "regalloc-score"
 
@@ -82,14 +88,55 @@ llvm::calculateRegAllocScore(const MachineFunction &MF,
       },
       [&](const MachineInstr &MI) {
         return MF.getSubtarget().getInstrInfo()->isReMaterializable(MI);
-      });
+      },
+      WidthUnit);
+}
+
+/// Number of UnitBits units covered by Bits, at least 1. Unknown widths are
+/// passed as 0.
+static double getWidthFactor(uint64_t Bits, unsigned UnitBits) {
+  return std::max<uint64_t>(1, divideCeil(Bits, UnitBits));
+}
+
+static double getCopyWidthFactor(const MachineInstr &MI, unsigned UnitBits) {
+  if (!UnitBits)
+    return 1.0;
+  const MachineFunction &MF = *MI.getMF();
+  const TargetRegisterInfo &TRI = *MF.getSubtarget().getRegisterInfo();
+  const MachineOperand &Dst = MI.getOperand(0);
+  if (unsigned SubIdx = Dst.getSubReg()) {
+    // -1 means the size depends on the register.
+    unsigned Bits = TRI.getSubRegIdxSize(SubIdx);
+    return getWidthFactor(Bits == ~0u ? 0 : Bits, UnitBits);
+  }
+  Register Reg = Dst.getReg();
+  TypeSize Size = TypeSize::getFixed(0);
+  if (Reg.isPhysical()) {
+    if (const TargetRegisterClass *RC = TRI.getMinimalPhysRegClass(Reg))
+      Size = TRI.getRegSizeInBits(*RC);
+  } else {
+    Size = TRI.getRegSizeInBits(Reg, MF.getRegInfo());
+  }
+  return getWidthFactor(Size.isScalable() ? 0 : Size.getFixedValue(), UnitBits);
+}
+
+static double getMemWidthFactor(const MachineInstr &MI, unsigned UnitBits) {
+  if (!UnitBits)
+    return 1.0;
+  uint64_t Bits = 0;
+  for (const MachineMemOperand *MMO : MI.memoperands()) {
+    LocationSize Size = MMO->getSizeInBits();
+    if (Size.isPrecise() && !Size.isScalable())
+      Bits = std::max(Bits, Size.getValue().getFixedValue());
+  }
+  return getWidthFactor(Bits, UnitBits);
 }
 
 RegAllocScore llvm::calculateRegAllocScore(
     const MachineFunction &MF,
     llvm::function_ref<double(const MachineBasicBlock &)> GetBBFreq,
-    llvm::function_ref<bool(const MachineInstr &)>
-        IsTriviallyRematerializable) {
+    llvm::function_ref<bool(const MachineInstr &)> IsTriviallyRematerializable,
+    unsigned WidthUnitBits) {
   RegAllocScore Total;
 
   for (const MachineBasicBlock &MBB : MF) {
@@ -101,19 +148,23 @@ RegAllocScore llvm::calculateRegAllocScore(
         continue;
       }
       if (MI.isCopy()) {
-        MBBScore.onCopy(BlockFreqRelativeToEntrypoint);
+        MBBScore.onCopy(BlockFreqRelativeToEntrypoint *
+                        getCopyWidthFactor(MI, WidthUnitBits));
       } else if (IsTriviallyRematerializable(MI)) {
         if (MI.getDesc().isAsCheapAsAMove()) {
           MBBScore.onCheapRemat(BlockFreqRelativeToEntrypoint);
         } else {
           MBBScore.onExpensiveRemat(BlockFreqRelativeToEntrypoint);
         }
-      } else if (MI.mayLoad() && MI.mayStore()) {
-        MBBScore.onLoadStore(BlockFreqRelativeToEntrypoint);
-      } else if (MI.mayLoad()) {
-        MBBScore.onLoad(BlockFreqRelativeToEntrypoint);
-      } else if (MI.mayStore()) {
-        MBBScore.onStore(BlockFreqRelativeToEntrypoint);
+      } else if (MI.mayLoad() || MI.mayStore()) {
+        double Freq = BlockFreqRelativeToEntrypoint *
+                      getMemWidthFactor(MI, WidthUnitBits);
+        if (!MI.mayStore())
+          MBBScore.onLoad(Freq);
+        else if (!MI.mayLoad())
+          MBBScore.onStore(Freq);
+        else
+          MBBScore.onLoadStore(Freq);
       }
     }
     Total += MBBScore;
