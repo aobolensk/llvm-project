@@ -187,6 +187,22 @@ define void @noalias_escape_after(ptr noalias %a, ptr %x) {
   ret void
 }
 
+; CHECK-LABEL: Function: kernel_noalias_no_escape:
+; CHECK:  Both ModRef:  Ptr: i32* %a	<->  fence release
+define amdgpu_kernel void @kernel_noalias_no_escape(ptr noalias %a) {
+  store i32 0, ptr %a
+  fence release
+  ret void
+}
+
+; CHECK-LABEL: Function: kernel_byval_no_escape:
+; CHECK:  NoModRef:  Ptr: i32* %a	<->  fence release
+define spir_kernel void @kernel_byval_no_escape(ptr byval(i32) %a) {
+  store i32 0, ptr %a
+  fence release
+  ret void
+}
+
 ; CHECK-LABEL: Function: malloc_no_escape:
 ; CHECK:  Both ModRef:  Ptr: i32* %a	<->  %a = call ptr @malloc(i64 4)
 ; CHECK:  Both ModRef:  Ptr: i32* %x	<->  %a = call ptr @malloc(i64 4)

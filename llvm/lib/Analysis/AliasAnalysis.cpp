@@ -469,9 +469,15 @@ ModRefInfo llvm::getSyncEffects(AAResults *AA, const MemoryLocation &Loc,
   // only captured after the operation, as the synchronization may still have
   // an effect if the object is only captured *later*. As such, set I to null
   // and ReturnCaptures to true here.
+  //
+  // Other work-items receive the same non-byval kernel arguments.
   const Value *Obj = getUnderlyingObject(Loc.Ptr);
-  CaptureComponents CC = AAQI.CA->getCapturesBefore(
-      Obj, /*I=*/nullptr, /*OrAt=*/true, /*ReturnCaptures=*/true);
+  const auto *Arg = dyn_cast<Argument>(Obj);
+  CaptureComponents CC =
+      Arg && Arg->getParent()->hasKernelCallingConv() && !Arg->hasByValAttr()
+          ? CaptureComponents::Provenance
+          : AAQI.CA->getCapturesBefore(Obj, /*I=*/nullptr, /*OrAt=*/true,
+                                       /*ReturnCaptures=*/true);
   if (capturesNothing(CC))
     return ModRefInfo::NoModRef;
 
