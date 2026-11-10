@@ -262,6 +262,476 @@ void SPIRVGlobalRegistry::invalidateMachineInstr(MachineInstr *MI) {
   erase(MI);
 }
 
+inline unsigned getAS(SPIRVTypeInst SpvType) {
+  return storageClassToAddressSpace(
+      static_cast<SPIRV::StorageClass::StorageClass>(
+          SpvType->getOperand(1).getImm()));
+}
+
+// Inverse of addNumImm, 32-bit words, low word first.
+static APInt decodeNumImm(const MachineInstr &MI) {
+  unsigned NumWords = MI.getNumExplicitOperands() - 2;
+  APInt Val = APInt::getZero(NumWords * 32);
+  for (unsigned I = 0; I < NumWords; ++I)
+    Val.insertBits(static_cast<uint32_t>(MI.getOperand(I + 2).getImm()), I * 32,
+                   32);
+  return Val;
+}
+
+namespace {
+// Derives the LLVM types the registry keys OpType* instructions by.
+struct LLVMTypeRestorer {
+  const MachineRegisterInfo &MRI;
+  LLVMContext &Ctx;
+  DenseMap<Register, std::string> Names;
+  DenseSet<Register> Packed, PushConstants, VkBuffers;
+  DenseMap<const MachineInstr *, Type *> Types;
+
+  LLVMTypeRestorer(const MachineFunction &MF)
+      : MRI(MF.getRegInfo()), Ctx(MF.getFunction().getContext()) {}
+
+  Type *getOperandType(const MachineOperand &MO) {
+    const MachineInstr *Def = MRI.getVRegDef(MO.getReg());
+    return Def ? get(*Def) : nullptr;
+  }
+
+  // i8 pointees were opaque pointers, others typed pointer wrappers.
+  Type *getComponentType(const MachineOperand &MO) {
+    const MachineInstr *Def = MRI.getVRegDef(MO.getReg());
+    if (Def && Def->getOpcode() == SPIRV::OpTypePointer) {
+      unsigned AS = getAS(Def);
+      Type *ElemTy = getOperandType(Def->getOperand(2));
+      if (!ElemTy || ElemTy->isIntegerTy(8))
+        return PointerType::get(Ctx, AS);
+      return getTypedPointerWrapper(ElemTy, AS);
+    }
+    return getOperandType(MO);
+  }
+
+  std::optional<uint64_t> getArrayLength(const MachineOperand &MO) {
+    const MachineInstr *Def = getImm(MO, &MRI);
+    if (!Def)
+      return std::nullopt;
+    APInt V = Def->getOpcode() == TargetOpcode::G_CONSTANT
+                  ? Def->getOperand(1).getCImm()->getValue()
+                  : decodeNumImm(*Def);
+    return V.isMaxValue() && V.getBitWidth() == 64 ? 0 : V.getZExtValue();
+  }
+
+  Type *createStruct(const MachineInstr &MI) {
+    Register Reg = MI.getOperand(0).getReg();
+    if (auto It = Names.find(Reg); It != Names.end())
+      if (StructType *STy = StructType::getTypeByName(Ctx, It->second))
+        return STy;
+    SmallVector<Type *> Elems;
+    for (const MachineInstr *I = &MI; I; I = I->getNextNode()) {
+      if (I != &MI && I->getOpcode() != SPIRV::OpTypeStructContinuedINTEL)
+        break;
+      for (const MachineOperand &MO : I->explicit_uses()) {
+        Elems.push_back(getComponentType(MO));
+        if (!Elems.back())
+          return nullptr;
+      }
+    }
+    // Mirror getOrCreateVulkanBufferType.
+    if (VkBuffers.contains(Reg))
+      return StructType::create(Elems);
+    return StructType::get(Ctx, Elems, Packed.contains(Reg));
+  }
+
+  Type *create(const MachineInstr &MI) {
+    switch (MI.getOpcode()) {
+    case SPIRV::OpTypeVoid:
+      return Type::getVoidTy(Ctx);
+    case SPIRV::OpTypeBool:
+      return Type::getInt1Ty(Ctx);
+    case SPIRV::OpTypeInt:
+      return IntegerType::get(Ctx, MI.getOperand(1).getImm());
+    case SPIRV::OpTypeFloat: {
+      int64_t Width = MI.getOperand(1).getImm();
+      if (MI.getNumOperands() > 2)
+        return Width == 16 && MI.getOperand(2).getImm() ==
+                                  SPIRV::FPEncoding::BFloat16KHR
+                   ? Type::getBFloatTy(Ctx)
+                   : nullptr;
+      if (Width == 16)
+        return Type::getHalfTy(Ctx);
+      if (Width == 32)
+        return Type::getFloatTy(Ctx);
+      if (Width == 64)
+        return Type::getDoubleTy(Ctx);
+      return nullptr;
+    }
+    case SPIRV::OpTypeVector:
+    case SPIRV::OpTypeVectorIdEXT: {
+      Type *ElemTy = getComponentType(MI.getOperand(1));
+      if (!ElemTy)
+        return nullptr;
+      if (MI.getOpcode() == SPIRV::OpTypeVector)
+        return FixedVectorType::get(ElemTy, MI.getOperand(2).getImm());
+      std::optional<uint64_t> N = getArrayLength(MI.getOperand(2));
+      return N ? FixedVectorType::get(ElemTy, *N) : nullptr;
+    }
+    case SPIRV::OpTypeArray:
+    case SPIRV::OpTypeRuntimeArray: {
+      Type *ElemTy = getComponentType(MI.getOperand(1));
+      if (!ElemTy)
+        return nullptr;
+      if (MI.getOpcode() == SPIRV::OpTypeRuntimeArray)
+        return ArrayType::get(ElemTy, 0);
+      std::optional<uint64_t> N = getArrayLength(MI.getOperand(2));
+      return N ? ArrayType::get(ElemTy, *N) : nullptr;
+    }
+    case SPIRV::OpTypeStruct: {
+      Register Reg = MI.getOperand(0).getReg();
+      Type *STy = createStruct(MI);
+      if (STy && PushConstants.contains(Reg))
+        return TargetExtType::get(Ctx, "spirv.PushConstant", {STy});
+      return STy;
+    }
+    case SPIRV::OpTypeOpaque: {
+      std::string Name = getStringImm(MI, 1);
+      if (StructType *STy = StructType::getTypeByName(Ctx, Name))
+        return STy;
+      return StructType::create(Ctx, Name);
+    }
+    case SPIRV::OpTypeFunction: {
+      Type *RetTy = getOperandType(MI.getOperand(1));
+      SmallVector<Type *> Params;
+      for (const MachineOperand &MO : drop_begin(MI.explicit_uses())) {
+        Params.push_back(getOperandType(MO));
+        if (!Params.back())
+          return nullptr;
+      }
+      return RetTy ? FunctionType::get(RetTy, Params, /*isVarArg=*/false)
+                   : nullptr;
+    }
+    case SPIRV::OpTypePointer: {
+      Type *ElemTy = getOperandType(MI.getOperand(2));
+      if (!ElemTy)
+        return nullptr;
+      return TypedPointerType::get(ElemTy, getAS(MI));
+    }
+    case SPIRV::OpTypeUntypedPointerKHR:
+      return PointerType::get(Ctx, getAS(MI));
+    case SPIRV::OpTypeImage:
+    case SPIRV::OpTypeSampledImage: {
+      const MachineInstr *Image = &MI;
+      StringRef Name = "spirv.SampledImage";
+      if (MI.getOpcode() == SPIRV::OpTypeSampledImage)
+        Image = MRI.getVRegDef(MI.getOperand(1).getReg());
+      else
+        Name = Names.lookup(MI.getOperand(0).getReg()) == "spirv.SignedImage"
+                   ? "spirv.SignedImage"
+                   : "spirv.Image";
+      Type *SampledTy = getOperandType(Image->getOperand(1));
+      if (!SampledTy)
+        return nullptr;
+      SmallVector<unsigned> Params;
+      for (const MachineOperand &MO : drop_begin(Image->explicit_uses()))
+        Params.push_back(MO.getImm());
+      return TargetExtType::get(Ctx, Name, {SampledTy}, Params);
+    }
+    case SPIRV::OpTypeCooperativeMatrixKHR: {
+      Type *ElemTy = getOperandType(MI.getOperand(1));
+      if (!ElemTy)
+        return nullptr;
+      SmallVector<unsigned> Params;
+      for (const MachineOperand &MO : drop_begin(MI.explicit_uses())) {
+        std::optional<uint64_t> V = getArrayLength(MO);
+        if (!V)
+          return nullptr;
+        Params.push_back(*V);
+      }
+      return TargetExtType::get(Ctx, "spirv.CooperativeMatrixKHR", {ElemTy},
+                                Params);
+    }
+    case SPIRV::OpTypePipe:
+      return TargetExtType::get(Ctx, "spirv.Pipe", {},
+                                {unsigned(MI.getOperand(1).getImm())});
+    case SPIRV::OpTypeSampler:
+      return TargetExtType::get(Ctx, "spirv.Sampler");
+    case SPIRV::OpTypeDeviceEvent:
+      return TargetExtType::get(Ctx, "spirv.DeviceEvent");
+    case SPIRV::OpTypeEvent:
+      return TargetExtType::get(Ctx, "spirv.Event");
+    case SPIRV::OpTypeQueue:
+      return TargetExtType::get(Ctx, "spirv.Queue");
+    case SPIRV::OpTypeReserveId:
+      return TargetExtType::get(Ctx, "spirv.ReserveId");
+    case SPIRV::OpTypePipeStorage:
+      return TargetExtType::get(Ctx, "spirv.PipeStorage");
+    default:
+      return nullptr;
+    }
+  }
+
+  // A null entry marks MI in progress, breaking cycles.
+  Type *get(const MachineInstr &MI) {
+    if (auto [It, Inserted] = Types.try_emplace(&MI, nullptr); !Inserted)
+      return It->second;
+    Type *Ty = create(MI);
+    if (Ty)
+      Ty = const_cast<Type *>(unifyPtrType(Ty));
+    Types[&MI] = Ty;
+    return Ty;
+  }
+};
+} // namespace
+
+// As keyed by createConstInt and createConstFP.
+static const Constant *getScalarConstant(const MachineInstr &MI, Type *Ty) {
+  if (!Ty->isIntegerTy() && !Ty->isFloatingPointTy())
+    return nullptr;
+  switch (MI.getOpcode()) {
+  case SPIRV::OpConstantTrue:
+  case SPIRV::OpConstantFalse:
+    return Ty->isIntegerTy(1)
+               ? ConstantInt::getBool(Ty->getContext(),
+                                      MI.getOpcode() == SPIRV::OpConstantTrue)
+               : nullptr;
+  case SPIRV::OpConstantNull:
+    return Constant::getNullValue(Ty);
+  case SPIRV::OpConstantI:
+  case SPIRV::OpConstantF: {
+    APInt Val = decodeNumImm(MI).zextOrTrunc(Ty->getScalarSizeInBits());
+    if (Ty->isIntegerTy())
+      return ConstantInt::get(Ty->getContext(), Val);
+    return ConstantFP::get(Ty->getContext(),
+                           APFloat(Ty->getFltSemantics(), Val));
+  }
+  default:
+    return nullptr;
+  }
+}
+
+void SPIRVGlobalRegistry::restoreFromMIR(MachineFunction &MF) {
+  const SPIRVInstrInfo &TII = *MF.getSubtarget<SPIRVSubtarget>().getInstrInfo();
+  LLVMTypeRestorer Restorer(MF);
+  DenseSet<Register> ExplicitLayout, Blocks, NonWritable;
+  SmallVector<const MachineInstr *> TypeInstrs, ConstInstrs, GlobalInstrs,
+      GlobalValues;
+  for (const MachineBasicBlock &MBB : MF) {
+    for (const MachineInstr &MI : MBB) {
+      if (MI.getOpcode() == SPIRV::OpName && MI.getOperand(0).isReg()) {
+        Restorer.Names[MI.getOperand(0).getReg()] = getStringImm(MI, 1);
+      } else if (MI.getOpcode() == SPIRV::OpDecorate) {
+        int64_t Dec = MI.getOperand(1).getImm();
+        if (Dec == SPIRV::Decoration::ArrayStride)
+          ExplicitLayout.insert(MI.getOperand(0).getReg());
+        else if (Dec == SPIRV::Decoration::CPacked)
+          Restorer.Packed.insert(MI.getOperand(0).getReg());
+        else if (Dec == SPIRV::Decoration::Block)
+          Blocks.insert(MI.getOperand(0).getReg());
+      } else if (MI.getOpcode() == SPIRV::OpMemberDecorate) {
+        int64_t Dec = MI.getOperand(2).getImm();
+        if (Dec == SPIRV::Decoration::Offset)
+          ExplicitLayout.insert(MI.getOperand(0).getReg());
+        else if (Dec == SPIRV::Decoration::NonWritable)
+          NonWritable.insert(MI.getOperand(0).getReg());
+      } else if (MI.getNumDefs() && TII.isTypeDeclInstr(MI)) {
+        TypeInstrs.push_back(&MI);
+      } else if (MI.getOpcode() == SPIRV::OpVariable ||
+                 MI.getOpcode() == SPIRV::OpUntypedVariableKHR ||
+                 MI.getOpcode() == SPIRV::OpFunction ||
+                 MI.getOpcode() == SPIRV::OpFunctionParameter) {
+        GlobalInstrs.push_back(&MI);
+      } else if (MI.getOpcode() == TargetOpcode::G_GLOBAL_VALUE) {
+        GlobalValues.push_back(&MI);
+      } else if (MI.getNumDefs() && TII.isConstantInstr(MI)) {
+        ConstInstrs.push_back(&MI);
+      }
+    }
+  }
+  for (const MachineInstr *MI : TypeInstrs)
+    if (MI->getOpcode() == SPIRV::OpTypePointer &&
+        Blocks.contains(MI->getOperand(2).getReg()))
+      (getPointerStorageClass(MI) == SPIRV::StorageClass::PushConstant
+           ? Restorer.PushConstants
+           : Restorer.VkBuffers)
+          .insert(MI->getOperand(2).getReg());
+
+  for (const MachineInstr *MI : TypeInstrs) {
+    Register Reg = MI->getOperand(0).getReg();
+    VRegToTypeMap[&MF][Reg] = MI;
+    const Type *Ty = Restorer.get(*MI);
+    if (!Ty)
+      continue;
+    SPIRVToLLVMType[MI] = Ty;
+    // Keys must match the getOrCreate* functions.
+    switch (MI->getOpcode()) {
+    case SPIRV::OpTypePointer: {
+      addTypeKey(Ty, false, MI, MF);
+      Register PointeeReg = MI->getOperand(2).getReg();
+      if (!Restorer.VkBuffers.contains(PointeeReg))
+        break;
+      const MachineInstr *Block = MF.getRegInfo().getVRegDef(PointeeReg);
+      BlockDecoratedTypes.insert(Block);
+      if (auto *STy = dyn_cast<StructType>(
+              cast<TypedPointerType>(Ty)->getElementType());
+          STy && STy->getNumElements() == 1)
+        add(SPIRV::irhandle_vkbuffer(STy->getElementType(0),
+                                     getPointerStorageClass(MI),
+                                     !NonWritable.contains(PointeeReg)),
+            MI);
+      break;
+    }
+    case SPIRV::OpTypeUntypedPointerKHR:
+      add(SPIRV::irhandle_untyped_pointer(getAS(MI)), MI);
+      break;
+    case SPIRV::OpTypeImage:
+      add(SPIRV::irhandle_image(cast<TargetExtType>(Ty)->getTypeParameter(0),
+                                MI),
+          MI);
+      break;
+    case SPIRV::OpTypeSampledImage:
+      add(SPIRV::irhandle_sampled_image(
+              cast<TargetExtType>(Ty)->getTypeParameter(0),
+              MF.getRegInfo().getVRegDef(MI->getOperand(1).getReg())),
+          MI);
+      break;
+    case SPIRV::OpTypeSampler:
+      add(SPIRV::irhandle_sampler(), MI);
+      break;
+    case SPIRV::OpTypePipe:
+      add(SPIRV::irhandle_pipe(MI->getOperand(1).getImm()), MI);
+      break;
+    case SPIRV::OpTypeDeviceEvent:
+      add(SPIRV::irhandle_event(), MI);
+      break;
+    case SPIRV::OpTypeStruct:
+      if (Restorer.PushConstants.contains(Reg)) {
+        BlockDecoratedTypes.insert(MI);
+        add(SPIRV::irhandle_vkbuffer(
+                cast<TargetExtType>(Ty)->getTypeParameter(0),
+                SPIRV::StorageClass::PushConstant, false),
+            MI);
+        break;
+      }
+      [[fallthrough]];
+    default:
+      addTypeKey(Ty, ExplicitLayout.contains(Reg), MI, MF);
+    }
+  }
+
+  for (const MachineInstr *MI : ConstInstrs)
+    if (Type *Ty = Restorer.getOperandType(MI->getOperand(1)))
+      if (const Constant *C = getScalarConstant(*MI, Ty))
+        add(C, MI);
+
+  // OpFunctions are MF, absent for the service function, then callee decls.
+  const Module &M = *MF.getFunction().getParent();
+  auto GetNamedValue = [&](Register Reg) {
+    return M.getNamedValue(Restorer.Names.lookup(Reg));
+  };
+  const Function *F = nullptr;
+  bool IsFirstFunction =
+      !MF.getFunction().hasFnAttribute(SPIRV_BACKEND_SERVICE_FUN_NAME);
+  unsigned ArgIdx = 0;
+  for (const MachineInstr *MI : GlobalInstrs) {
+    Register Reg = MI->getOperand(0).getReg();
+    if (MI->getOpcode() == SPIRV::OpFunction) {
+      F = IsFirstFunction ? &MF.getFunction()
+                          : dyn_cast_or_null<Function>(GetNamedValue(Reg));
+      IsFirstFunction = false;
+      ArgIdx = 0;
+      if (!F)
+        continue;
+      recordFunctionDefinition(F, &MI->getOperand(0));
+      addGlobalObject(F, &MF, Reg);
+      if (F->isDeclaration())
+        add(F, MI);
+    } else if (MI->getOpcode() == SPIRV::OpFunctionParameter) {
+      if (!F || ArgIdx >= F->arg_size())
+        continue;
+      const Argument *Arg = F->getArg(ArgIdx++);
+      if (F->isDeclaration())
+        add(Arg, MI);
+      addGlobalObject(Arg, &MF, Reg);
+    } else if (MI->getOperand(2).getImm() != SPIRV::StorageClass::Function) {
+      if (const GlobalValue *GV = GetNamedValue(Reg)) {
+        add(GV, MI);
+        addGlobalObject(GV, &MF, Reg);
+      }
+    }
+  }
+
+  // Element types SPIRVEmitIntrinsics deduced for globals.
+  for (const MachineInstr *MI : GlobalValues) {
+    auto *GV = dyn_cast<GlobalVariable>(MI->getOperand(1).getGlobal());
+    SPIRVTypeInst PtrTy = getSPIRVTypeForVReg(MI->getOperand(0).getReg(), &MF);
+    if (!GV || !PtrTy || PtrTy->getOpcode() != SPIRV::OpTypePointer)
+      continue;
+    if (Type *ElemTy = Restorer.getOperandType(PtrTy->getOperand(2)))
+      addDeducedElementType(const_cast<GlobalVariable *>(GV), ElemTy);
+  }
+}
+
+static bool isContinuedInstr(const MachineInstr &MI) {
+  switch (MI.getOpcode()) {
+  case SPIRV::OpTypeStructContinuedINTEL:
+  case SPIRV::OpConstantCompositeContinuedINTEL:
+  case SPIRV::OpSpecConstantCompositeContinuedINTEL:
+  case SPIRV::OpCompositeConstructContinuedINTEL:
+    return true;
+  default:
+    return false;
+  }
+}
+
+// Registry maps may hold erased instructions, so only compare pointers.
+static SmallPtrSet<const MachineInstr *, 16>
+getTypeInstrs(const MachineFunction &MF) {
+  const SPIRVInstrInfo &TII = *MF.getSubtarget<SPIRVSubtarget>().getInstrInfo();
+  SmallPtrSet<const MachineInstr *, 16> TypeInstrs;
+  for (const MachineBasicBlock &MBB : MF)
+    for (const MachineInstr &MI : MBB)
+      if (MI.getNumDefs() && TII.isTypeDeclInstr(MI))
+        TypeInstrs.insert(&MI);
+  return TypeInstrs;
+}
+
+Register
+SPIRVGlobalRegistry::getLastInsertedTypeReg(const MachineFunction &MF) const {
+  auto It = LastInsertedTypeMap.find(&MF);
+  if (It == LastInsertedTypeMap.end())
+    return Register();
+  for (const MachineBasicBlock &MBB : MF) {
+    for (const MachineInstr &MI : MBB) {
+      if (&MI != It->second)
+        continue;
+      const MachineInstr *Head = &MI;
+      while (isContinuedInstr(*Head) && Head->getPrevNode())
+        Head = Head->getPrevNode();
+      return Head->getNumDefs() ? Head->getOperand(0).getReg() : Register();
+    }
+  }
+  return Register();
+}
+
+void SPIRVGlobalRegistry::setLastInsertedType(const MachineFunction &MF,
+                                              MachineInstr *MI) {
+  while (MI->getNextNode() && isContinuedInstr(*MI->getNextNode()))
+    MI = MI->getNextNode();
+  LastInsertedTypeMap[&MF] = MI;
+}
+
+SmallVector<std::pair<Register, Register>>
+SPIRVGlobalRegistry::getVRegTypeIDs(const MachineFunction &MF) const {
+  SmallVector<std::pair<Register, Register>> Res;
+  auto TypesIt = VRegToTypeMap.find(&MF);
+  if (TypesIt == VRegToTypeMap.end())
+    return Res;
+  SmallPtrSet<const MachineInstr *, 16> TypeInstrs = getTypeInstrs(MF);
+  const MachineRegisterInfo &MRI = MF.getRegInfo();
+  for (auto [Reg, Ty] : TypesIt->second)
+    if (TypeInstrs.contains(Ty) && Ty->getOperand(0).getReg() != Reg &&
+        !MRI.reg_empty(Reg))
+      Res.emplace_back(Reg, getSPIRVTypeID(Ty));
+  llvm::sort(Res);
+  return Res;
+}
+
 const MachineInstr *SPIRVGlobalRegistry::createConstOrTypeAtFunctionEntry(
     MachineIRBuilder &MIRBuilder,
     std::function<MachineInstr *(MachineIRBuilder &)> Op) {
@@ -287,28 +757,13 @@ const MachineInstr *SPIRVGlobalRegistry::createConstOrTypeAtFunctionEntry(
     MIRBuilder.setInsertPt(*NewMBB, InsertAt);
   } else {
     MIRBuilder.setInsertPt(*NewMBB, NewMBB->begin());
-    auto Result = LastInsertedTypeMap.try_emplace(CurMF, nullptr);
-    assert(Result.second);
-    LastInsertedType = Result.first;
   }
 
   MachineInstr *ConstOrType = Op(MIRBuilder);
   // We expect all users of this function to insert definitions at the insertion
   // point set above that is always the first MBB.
   assert(ConstOrType->getParent() == NewMBB);
-  LastInsertedType->second = ConstOrType;
-  // Advance past any continued instructions so that the next type/constant
-  // is inserted after the full group, preserving required adjacency.
-  while (auto *Next = LastInsertedType->second->getNextNode()) {
-    unsigned Opc = Next->getOpcode();
-    if (Opc == SPIRV::OpTypeStructContinuedINTEL ||
-        Opc == SPIRV::OpConstantCompositeContinuedINTEL ||
-        Opc == SPIRV::OpSpecConstantCompositeContinuedINTEL ||
-        Opc == SPIRV::OpCompositeConstructContinuedINTEL)
-      LastInsertedType->second = Next;
-    else
-      break;
-  }
+  setLastInsertedType(*CurMF, ConstOrType);
 
   MIRBuilder.setInsertPt(*OldMBB, oldInsertPoint);
   return ConstOrType;
@@ -1347,11 +1802,19 @@ SPIRVTypeInst SPIRVGlobalRegistry::restOfCreateSPIRVType(
   // Is that a problem?
   SPIRVToLLVMType[SpirvType] = unifyPtrType(Ty);
 
-  if (SpirvType->getOpcode() == SPIRV::OpTypeForwardPointer ||
-      SpirvType->getOpcode() == SPIRV::OpTypeUntypedPointerKHR ||
-      findMI(Ty, false, &MIRBuilder.getMF()) || isSpecialOpaqueType(Ty))
-    return SpirvType;
+  if (SpirvType->getOpcode() != SPIRV::OpTypeForwardPointer &&
+      SpirvType->getOpcode() != SPIRV::OpTypeUntypedPointerKHR &&
+      !isSpecialOpaqueType(Ty))
+    addTypeKey(Ty, ExplicitLayoutRequired, SpirvType, MIRBuilder.getMF());
+  return SpirvType;
+}
 
+void SPIRVGlobalRegistry::addTypeKey(const Type *Ty,
+                                     bool ExplicitLayoutRequired,
+                                     SPIRVTypeInst SpirvType,
+                                     const MachineFunction &MF) {
+  if (findMI(Ty, false, &MF))
+    return;
   if (auto *ExtTy = dyn_cast<TargetExtType>(Ty);
       ExtTy && isTypedPointerWrapper(ExtTy))
     add(ExtTy->getTypeParameter(0), ExtTy->getIntParameter(0), SpirvType);
@@ -1361,9 +1824,8 @@ SPIRVTypeInst SPIRVGlobalRegistry::restOfCreateSPIRVType(
     add(cast<TypedPointerType>(Ty)->getElementType(),
         getPointerAddressSpace(Ty), SpirvType);
   else
-    add(Type::getInt8Ty(MIRBuilder.getMF().getFunction().getContext()),
-        getPointerAddressSpace(Ty), SpirvType);
-  return SpirvType;
+    add(Type::getInt8Ty(Ty->getContext()), getPointerAddressSpace(Ty),
+        SpirvType);
 }
 
 SPIRVTypeInst
@@ -2216,12 +2678,6 @@ SPIRVGlobalRegistry::getRegClass(SPIRVTypeInst SpvType) const {
   }
   }
   return &SPIRV::iIDRegClass;
-}
-
-inline unsigned getAS(SPIRVTypeInst SpvType) {
-  return storageClassToAddressSpace(
-      static_cast<SPIRV::StorageClass::StorageClass>(
-          SpvType->getOperand(1).getImm()));
 }
 
 LLT SPIRVGlobalRegistry::getRegType(SPIRVTypeInst SpvType) const {

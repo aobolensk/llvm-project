@@ -115,6 +115,9 @@ class SPIRVGlobalRegistry : public SPIRVIRMapping {
   restOfCreateSPIRVType(const Type *Type, MachineIRBuilder &MIRBuilder,
                         SPIRV::AccessQualifier::AccessQualifier AccessQual,
                         bool ExplicitLayoutRequired, bool EmitIR);
+  // Key SpirvType by Ty unless Ty already has a type in MF.
+  void addTypeKey(const Type *Ty, bool ExplicitLayoutRequired,
+                  SPIRVTypeInst SpirvType, const MachineFunction &MF);
 
   // Internal function creating the Types/Constants at the correct position
   // in the function by tweaking the passed "MIRBuilder" insertion point and
@@ -464,6 +467,17 @@ public:
   // Informs about removal of the machine instruction and invalidates data
   // structures referring this instruction.
   void invalidateMachineInstr(MachineInstr *MI);
+
+  // Rebuild the state of MF after loading MIR.
+  void restoreFromMIR(MachineFunction &MF);
+
+  // (VReg, type ID) pairs of non-type VRegs, sorted by VReg.
+  SmallVector<std::pair<Register, Register>>
+  getVRegTypeIDs(const MachineFunction &MF) const;
+
+  // Types and constants are inserted after this one at the entry of MF.
+  Register getLastInsertedTypeReg(const MachineFunction &MF) const;
+  void setLastInsertedType(const MachineFunction &MF, MachineInstr *MI);
 
 private:
   SPIRVTypeInst getOpTypeBool(MachineIRBuilder &MIRBuilder);

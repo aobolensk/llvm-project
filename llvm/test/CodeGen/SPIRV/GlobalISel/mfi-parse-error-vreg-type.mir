@@ -1,0 +1,12 @@
+# RUN: not llc -mtriple=spirv64-unknown-unknown -run-pass=none -filetype=null %s 2>&1 | FileCheck %s
+---
+name: not_a_type
+machineFunctionInfo:
+  vregTypes:
+    - { reg: '%1', type: '%1' }
+# CHECK: :[[@LINE-1]]:{{[0-9]+}}: expected a SPIR-V type register
+body:             |
+  bb.0:
+    %0:type(s64) = OpTypeInt 32, 0
+    %1:iid(s32) = OpConstantNull %0(s64)
+...
