@@ -147,6 +147,13 @@ public:
       return {};
     return cir::TargetAddressSpaceAttr::get(ctx, defaultASAttr.getUInt());
   }
+
+  mlir::ptr::MemorySpaceAttrInterface
+  getProgramAddrSpace(mlir::MLIRContext *ctx) const {
+    if (programAddrSpace == 0)
+      return {};
+    return cir::TargetAddressSpaceAttr::get(ctx, programAddrSpace);
+  }
 };
 
 } // namespace cir

@@ -1553,7 +1553,9 @@ void CIRGenItaniumCXXABI::emitThrow(CIRGenFunction &cgf,
   // Lowering pass to skip passing the trivial function.
   //
   const auto *cxxrd = clangThrowType->getAsCXXRecordDecl();
-  cir::PointerType dtorTy = builder.getVoidPtrTy();
+  mlir::ptr::MemorySpaceAttrInterface programAddrSpace =
+      cgm.getDataLayout().getProgramAddrSpace(&cgm.getMLIRContext());
+  cir::PointerType dtorTy = builder.getVoidPtrTy(programAddrSpace);
   mlir::Value dtor = builder.getNullPtr(dtorTy, subExprLoc);
   if (cxxrd && !cxxrd->hasTrivialDestructor()) {
     // __cxa_throw is declared to take its destructor as void (*)(void *). We
@@ -1564,7 +1566,7 @@ void CIRGenItaniumCXXABI::emitThrow(CIRGenFunction &cgf,
     cir::FuncOp dtorFunc =
         cgm.getAddrOfCXXStructor(GlobalDecl(dtorD, Dtor_Complete));
     cir::PointerType dtorFuncPtrTy =
-        builder.getPointerTo(dtorFunc.getFunctionType());
+        builder.getPointerTo(dtorFunc.getFunctionType(), programAddrSpace);
     dtor = cir::GetGlobalOp::create(builder, subExprLoc, dtorFuncPtrTy,
                                     dtorFunc.getSymName());
     dtor = builder.createBitcast(dtor, dtorTy);

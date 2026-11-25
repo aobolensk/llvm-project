@@ -8,16 +8,17 @@ module attributes {
   cir.triple = "x86_64-unknown-linux-gnu",
   dlti.dl_spec = #dlti.dl_spec<
     "dlti.default_memory_space" = 7 : ui64,
-    "dlti.global_memory_space" = 3 : ui64>
+    "dlti.global_memory_space" = 3 : ui64,
+    "dlti.program_memory_space" = 4 : ui64>
 } {
   cir.func @test_nonzero_default_address_space(
       %exception: !cir.ptr<!s32i, target_address_space(7)>,
       %type_info: !cir.ptr<!u8i, target_address_space(3)>,
-      %dtor: !cir.ptr<!u8i, target_address_space(7)>) {
+      %dtor: !cir.ptr<!u8i, target_address_space(4)>) {
     cir.try_throw %exception, %type_info, %dtor :
         !cir.ptr<!s32i, target_address_space(7)>,
         !cir.ptr<!u8i, target_address_space(3)>,
-        !cir.ptr<!u8i, target_address_space(7)> ^normal, ^unwind
+        !cir.ptr<!u8i, target_address_space(4)> ^normal, ^unwind
   ^normal:
     cir.return
   ^unwind:
@@ -33,13 +34,13 @@ module attributes {
 // CHECK-LABEL: cir.func @test_nonzero_default_address_space(
 // CHECK: %[[EXCEPTION:.*]] = cir.cast bitcast %{{.*}} : !cir.ptr<!s32i, target_address_space(7)> -> !cir.ptr<!void, target_address_space(7)>
 // CHECK: %[[TYPE_INFO:.*]] = cir.cast bitcast %{{.*}} : !cir.ptr<!u8i, target_address_space(3)> -> !cir.ptr<!void, target_address_space(3)>
-// CHECK: %[[DTOR:.*]] = cir.cast bitcast %{{.*}} : !cir.ptr<!u8i, target_address_space(7)> -> !cir.ptr<!void, target_address_space(7)>
+// CHECK: %[[DTOR:.*]] = cir.cast bitcast %{{.*}} : !cir.ptr<!u8i, target_address_space(4)> -> !cir.ptr<!void, target_address_space(4)>
 // CHECK: cir.try_call @__cxa_throw(%[[EXCEPTION]], %[[TYPE_INFO]], %[[DTOR]])
-// CHECK-SAME: (!cir.ptr<!void, target_address_space(7)>, !cir.ptr<!void, target_address_space(3)>, !cir.ptr<!void, target_address_space(7)>) -> ()
+// CHECK-SAME: (!cir.ptr<!void, target_address_space(7)>, !cir.ptr<!void, target_address_space(3)>, !cir.ptr<!void, target_address_space(4)>) -> ()
 // CHECK: %[[INFLIGHT_EXN:.*]], %[[TYPE_ID:.*]] = cir.eh.inflight_exception cleanup
 // CHECK: cir.br {{.*}}(%[[INFLIGHT_EXN]], %[[TYPE_ID]] : !cir.ptr<!void>, !u32i)
 
 // CHECK: cir.func private @__cxa_throw(
 // CHECK-SAME: !cir.ptr<!void, target_address_space(7)>,
 // CHECK-SAME: !cir.ptr<!void, target_address_space(3)>,
-// CHECK-SAME: !cir.ptr<!void, target_address_space(7)>)
+// CHECK-SAME: !cir.ptr<!void, target_address_space(4)>)

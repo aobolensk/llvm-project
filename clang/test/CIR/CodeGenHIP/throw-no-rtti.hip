@@ -16,6 +16,15 @@
 // RUN: %clang_cc1 -std=c++17 -triple amdgcn-amd-amdhsa -x c++ \
 // RUN:   -fcxx-exceptions -fexceptions -emit-llvm %s -o - \
 // RUN:   | FileCheck %s --check-prefix=AMDGPU-RTTI-LLVM
+// RUN: %clang_cc1 -std=c++17 -triple spirv64-amd-amdhsa -x hip \
+// RUN:   -fcuda-is-device --hipstdpar -fcxx-exceptions -fexceptions \
+// RUN:   -fclangir -emit-cir %s -o - | FileCheck %s --check-prefix=SPIRV-CIR
+// RUN: %clang_cc1 -std=c++17 -triple spirv64-amd-amdhsa -x hip \
+// RUN:   -fcuda-is-device --hipstdpar -fcxx-exceptions -fexceptions \
+// RUN:   -fclangir -emit-llvm %s -o - | FileCheck %s --check-prefix=SPIRV
+// RUN: %clang_cc1 -std=c++17 -triple spirv64-amd-amdhsa -x hip \
+// RUN:   -fcuda-is-device --hipstdpar -fcxx-exceptions -fexceptions \
+// RUN:   -emit-llvm %s -o - | FileCheck %s --check-prefix=SPIRV
 
 struct X {
   ~X();
@@ -97,3 +106,22 @@ int main() {
 // OGCG-LABEL: define{{.*}} void @_Z25throw_object_with_cleanupv()
 // OGCG: call void @__cxa_throw(ptr %{{.*}}, ptr addrspace(1) null, ptr @_ZN1XD1Ev)
 // OGCG: declare void @__cxa_throw(ptr, ptr addrspace(1), ptr)
+
+// The destructor pointer uses the program address space.
+// SPIRV-CIR-LABEL: cir.func{{.*}} @_Z9throw_intv()
+// SPIRV-CIR: %[[DTOR:.*]] = cir.const #cir.ptr<null> : !cir.ptr<!void, target_address_space(4)>
+// SPIRV-CIR: cir.throw %{{.*}}, %{{.*}}, %[[DTOR]] : {{.*}}, !cir.ptr<!void, target_address_space(4)>
+// SPIRV-CIR-LABEL: cir.func{{.*}} @_Z12throw_objectv()
+// SPIRV-CIR: %[[DTOR_ADDR:.*]] = cir.get_global @_ZN1XD1Ev : !cir.ptr<!cir.func<{{.*}}>, target_address_space(4)>
+// SPIRV-CIR: %[[DTOR:.*]] = cir.cast bitcast %[[DTOR_ADDR]] : {{.*}} -> !cir.ptr<!void, target_address_space(4)>
+// SPIRV-CIR: cir.throw %{{.*}}, %{{.*}}, %[[DTOR]] : {{.*}}, !cir.ptr<!void, target_address_space(4)>
+
+// SPIRV-LABEL: define{{.*}} void @_Z9throw_intv()
+// SPIRV: {{call|invoke}} {{.*}}void @__cxa_throw({{.*}}, ptr addrspace(1) null, ptr addrspace(4) null)
+// SPIRV-LABEL: define{{.*}} void @_Z12throw_objectv()
+// SPIRV: {{call|invoke}} {{.*}}void @__cxa_throw({{.*}}, ptr addrspace(1) null, ptr addrspace(4) @_ZN1XD1Ev)
+// SPIRV-LABEL: define{{.*}} void @_Z18throw_with_cleanupv()
+// SPIRV: {{call|invoke}} {{.*}}void @__cxa_throw({{.*}}, ptr addrspace(1) null, ptr addrspace(4) null)
+// SPIRV-LABEL: define{{.*}} void @_Z25throw_object_with_cleanupv()
+// SPIRV: {{call|invoke}} {{.*}}void @__cxa_throw({{.*}}, ptr addrspace(1) null, ptr addrspace(4) @_ZN1XD1Ev)
+// SPIRV: declare {{.*}}void @__cxa_throw({{.*}}, ptr addrspace(1), ptr addrspace(4)) addrspace(4)

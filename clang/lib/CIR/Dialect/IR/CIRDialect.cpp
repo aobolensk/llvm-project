@@ -2745,7 +2745,15 @@ cir::GetGlobalOp::verifySymbolUses(SymbolTableCollection &symbolTable) {
            << resultType.getPointee() << "' does not match type " << symTy
            << " of the global @" << getName();
 
-  if (symAddrSpaceAttr != resultType.getAddrSpace()) {
+  // A function address may also be taken in the program address space.
+  bool isProgramAS = false;
+  if (isa<FuncOp>(op) && resultType.getAddrSpace()) {
+    auto module = getOperation()->getParentOfType<ModuleOp>();
+    isProgramAS =
+        module && resultType.getAddrSpace() ==
+                      CIRDataLayout(module).getProgramAddrSpace(getContext());
+  }
+  if (!isProgramAS && symAddrSpaceAttr != resultType.getAddrSpace()) {
     return emitOpError()
            << "result type address space does not match the address "
               "space of the global @"
@@ -5087,6 +5095,7 @@ static mlir::LogicalResult verifyThrowOpImpl(ThrowOpTy op) {
   cir::CIRDataLayout dataLayout(module);
   auto defaultAddrSpace = dataLayout.getDefaultAddrSpace(op.getContext());
   auto globalAddrSpace = dataLayout.getDefaultGlobalsAddrSpace(op.getContext());
+  auto programAddrSpace = dataLayout.getProgramAddrSpace(op.getContext());
 
   auto getAddrSpace = [](mlir::Value operand) {
     return mlir::cast<cir::PointerType>(operand.getType()).getAddrSpace();
@@ -5100,9 +5109,9 @@ static mlir::LogicalResult verifyThrowOpImpl(ThrowOpTy op) {
     return op.emitOpError(
         "type_info pointer must use the module's global address space");
 
-  if (getAddrSpace(op.getDtor()) != defaultAddrSpace)
+  if (getAddrSpace(op.getDtor()) != programAddrSpace)
     return op.emitOpError(
-        "destructor pointer must use the module's default address space");
+        "destructor pointer must use the module's program address space");
 
   return mlir::success();
 }

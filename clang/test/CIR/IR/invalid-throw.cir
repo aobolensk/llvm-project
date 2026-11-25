@@ -59,7 +59,7 @@ module attributes {
   dlti.dl_spec = #dlti.dl_spec<"dlti.global_memory_space" = 1 : ui64>
 } {
 cir.func @throw_with_dtor_as2(%exception: !cir.ptr<!s32i>, %type_info: !cir.ptr<!u8i, target_address_space(1)>, %dtor: !cir.ptr<!void, target_address_space(2)>) {
-  // expected-error @below {{'cir.throw' op destructor pointer must use the module's default address space}}
+  // expected-error @below {{'cir.throw' op destructor pointer must use the module's program address space}}
   cir.throw %exception, %type_info, %dtor : !cir.ptr<!s32i>, !cir.ptr<!u8i, target_address_space(1)>, !cir.ptr<!void, target_address_space(2)>
   cir.unreachable
 }
@@ -95,21 +95,22 @@ cir.func @try_throw_with_as2(%exception: !cir.ptr<!s32i>, %type_info: !cir.ptr<!
 module attributes {
   dlti.dl_spec = #dlti.dl_spec<
     "dlti.default_memory_space" = 7 : ui64,
-    "dlti.global_memory_space" = 1 : ui64>
+    "dlti.global_memory_space" = 1 : ui64,
+    "dlti.program_memory_space" = 4 : ui64>
 } {
 
 // Different pointee types are valid when the address-space signature is the
 // same.
-cir.func @try_throw_one(%exception: !cir.ptr<!s32i, target_address_space(7)>, %type_info: !cir.ptr<!u8i, target_address_space(1)>, %dtor: !cir.ptr<!void, target_address_space(7)>) {
-  cir.try_throw %exception, %type_info, %dtor : !cir.ptr<!s32i, target_address_space(7)>, !cir.ptr<!u8i, target_address_space(1)>, !cir.ptr<!void, target_address_space(7)> ^normal, ^unwind
+cir.func @try_throw_one(%exception: !cir.ptr<!s32i, target_address_space(7)>, %type_info: !cir.ptr<!u8i, target_address_space(1)>, %dtor: !cir.ptr<!void, target_address_space(4)>) {
+  cir.try_throw %exception, %type_info, %dtor : !cir.ptr<!s32i, target_address_space(7)>, !cir.ptr<!u8i, target_address_space(1)>, !cir.ptr<!void, target_address_space(4)> ^normal, ^unwind
 ^normal:
   cir.unreachable
 ^unwind:
   cir.unreachable
 }
 
-cir.func @throw_two(%exception: !cir.ptr<!u8i, target_address_space(7)>, %type_info: !cir.ptr<!void, target_address_space(1)>, %dtor: !cir.ptr<!s32i, target_address_space(7)>) {
-  cir.throw %exception, %type_info, %dtor : !cir.ptr<!u8i, target_address_space(7)>, !cir.ptr<!void, target_address_space(1)>, !cir.ptr<!s32i, target_address_space(7)>
+cir.func @throw_two(%exception: !cir.ptr<!u8i, target_address_space(7)>, %type_info: !cir.ptr<!void, target_address_space(1)>, %dtor: !cir.ptr<!s32i, target_address_space(4)>) {
+  cir.throw %exception, %type_info, %dtor : !cir.ptr<!u8i, target_address_space(7)>, !cir.ptr<!void, target_address_space(1)>, !cir.ptr<!s32i, target_address_space(4)>
   cir.unreachable
 }
 

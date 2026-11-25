@@ -122,6 +122,7 @@ private:
   cir::PointerType voidPtrType;
   cir::PointerType cxaThrowVoidPtrType;
   cir::PointerType globalVoidPtrType;
+  cir::PointerType programVoidPtrType;
   cir::PointerType u8PtrType;
   cir::IntType u32Type;
   cir::IntType s32Type;
@@ -174,6 +175,8 @@ mlir::LogicalResult ItaniumEHLowering::run() {
   auto globalAddrSpace = dataLayout.getDefaultGlobalsAddrSpace(ctx);
   cxaThrowVoidPtrType = cir::PointerType::get(voidType, defaultAddrSpace);
   globalVoidPtrType = cir::PointerType::get(voidType, globalAddrSpace);
+  programVoidPtrType =
+      cir::PointerType::get(voidType, dataLayout.getProgramAddrSpace(ctx));
   auto u8Type = cir::IntType::get(ctx, 8, /*isSigned=*/false);
   u8PtrType = cir::PointerType::get(u8Type);
   u32Type = cir::IntType::get(ctx, 32, /*isSigned=*/false);
@@ -280,12 +283,13 @@ void ItaniumEHLowering::ensureClangCallTerminate(mlir::Location loc) {
 ///   void __cxa_throw(void *exception, global void *type_info, void *dtor);
 ///
 /// The type-info pointer may use a target-specific global address space. The
-/// exception and destructor pointers use the target's default address space.
+/// exception pointer uses the default address space of the target and the
+/// destructor pointer the program address space.
 void ItaniumEHLowering::ensureCxaThrowDecl(mlir::Location loc) {
   if (cxaThrowFunc)
     return;
   auto throwFuncTy = cir::FuncType::get(
-      {cxaThrowVoidPtrType, globalVoidPtrType, cxaThrowVoidPtrType}, voidType,
+      {cxaThrowVoidPtrType, globalVoidPtrType, programVoidPtrType}, voidType,
       /*isVarArg=*/false);
   cxaThrowFunc =
       getOrCreateRuntimeFuncDecl(mod, loc, "__cxa_throw", throwFuncTy);
@@ -962,7 +966,7 @@ mlir::LogicalResult ItaniumEHLowering::lowerTryThrow(cir::TryThrowOp op) {
 
   mlir::Value exnPtr = castToVoidPtr(op.getExceptionPtr(), cxaThrowVoidPtrType);
   mlir::Value typeInfo = castToVoidPtr(op.getTypeInfo(), globalVoidPtrType);
-  mlir::Value dtor = castToVoidPtr(op.getDtor(), cxaThrowVoidPtrType);
+  mlir::Value dtor = castToVoidPtr(op.getDtor(), programVoidPtrType);
 
   ensureCxaThrowDecl(loc);
 
