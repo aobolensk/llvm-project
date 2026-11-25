@@ -211,13 +211,34 @@ static const ContinueStmt *findLoopBodyContinue(const Stmt *s) {
   return nullptr;
 }
 
+/// Returns the innermost loop associated with \p s, starting from \p outer,
+/// or null after reporting a nest form not supported yet.
+static const ForStmt *getInnermostLoop(CIRGenModule &cgm,
+                                       const OMPLoopDirective &s,
+                                       const ForStmt *outer) {
+  const ForStmt *loop = outer;
+  for (unsigned i = 1, e = s.getLoopsNumber(); i < e; ++i) {
+    const Stmt *next = loop->getBody()->IgnoreContainers();
+    loop = dyn_cast<ForStmt>(next);
+    if (!loop) {
+      cgm.errorNYI(
+          next->getSourceRange(),
+          isa<CXXForRangeStmt>(next)
+              ? "range-based for loop in an OpenMP loop directive"
+              : "OpenMP loop nest that is not perfectly nested 'for' loops");
+      return nullptr;
+    }
+  }
+  return loop;
+}
+
 /// Emits an omp.loop_nest that iterates a normalized `[0, tripCount)` range
-/// and recomputes the real induction variable each iteration using the given
-/// update expression.
+/// and recomputes the real induction variables each iteration using the given
+/// update expressions.
 static mlir::LogicalResult
-emitOMPLoopNest(CIRGenFunction &cgf, const ForStmt &forStmt, mlir::Value lb,
-                mlir::Value ub, mlir::Value step, const VarDecl *ivDecl,
-                const Expr *update) {
+emitOMPLoopNest(CIRGenFunction &cgf, const ForStmt &forStmt, const Stmt *body,
+                mlir::Value lb, mlir::Value ub, mlir::Value step,
+                const VarDecl *ivDecl, llvm::ArrayRef<Expr *> updates) {
   CIRGenBuilderTy &builder = cgf.getBuilder();
   mlir::Location loc = cgf.getLoc(forStmt.getSourceRange());
 
@@ -230,36 +251,36 @@ emitOMPLoopNest(CIRGenFunction &cgf, const ForStmt &forStmt, mlir::Value lb,
   return emitOMPRegionBody<mlir::omp::YieldOp>(
       cgf, block, loc, cgf.getLoc(forStmt.getEndLoc()),
       [&]() -> mlir::LogicalResult {
-        // Store the normalized counter block argument into the normalized
-        // loop variable's storage location, then let Sema's update expression
-        // recompute the real induction variable from it.
+        // Store the normalized counter block argument into the storage of the
+        // normalized loop variable, then let the Sema update expressions
+        // recompute the real induction variables from it.
         mlir::Value iv = block.getArgument(0);
         Address ivAddr = cgf.getAddrOfLocalVar(ivDecl);
         mlir::Value civVal =
             builder.createBuiltinIntCast(loc, iv, ivAddr.getElementType());
         builder.createStore(loc, civVal, ivAddr);
-        cgf.emitIgnoredExpr(update);
+        for (const Expr *update : updates)
+          cgf.emitIgnoredExpr(update);
 
-        if (!forStmt.getBody())
+        if (!body)
           return mlir::success();
-        return cgf.emitStmt(forStmt.getBody(), /*useCurrentScope=*/true);
+        return cgf.emitStmt(body, /*useCurrentScope=*/true);
       });
 }
 
-/// Evaluates the clauses allowed on the `for` directive; none are supported
-/// yet, so every eligible clause is reported as NYI.
+/// Evaluates the clauses allowed on the `for` directive. `collapse` needs no
+/// operands since Sema already folds the loop nest into one iteration space.
 static mlir::LogicalResult
 emitWsloopClauses(CIRGenFunction &cgf, CIRGenModule &cgm,
                   CIRGenBuilderTy &builder, mlir::Location loc,
                   llvm::ArrayRef<const OMPClause *> clauses,
                   mlir::omp::WsloopOperands &clauseOps) {
   OpenMPClauseEmitter ce(cgf, cgm, builder, loc, clauses);
-  return ce.emitNYI</*supported=*/>(
+  return ce.emitNYI</*supported=*/OMPCollapseClause>(
       /*nyi=*/OpenMPNYIClauseList<
-          OMPAllocateClause, OMPCollapseClause, OMPFirstprivateClause,
-          OMPLastprivateClause, OMPLinearClause, OMPNowaitClause,
-          OMPOrderClause, OMPOrderedClause, OMPPrivateClause,
-          OMPReductionClause, OMPScheduleClause>{},
+          OMPAllocateClause, OMPFirstprivateClause, OMPLastprivateClause,
+          OMPLinearClause, OMPNowaitClause, OMPOrderClause, OMPOrderedClause,
+          OMPPrivateClause, OMPReductionClause, OMPScheduleClause>{},
       llvm::omp::Directive::OMPD_for);
 }
 
@@ -350,10 +371,22 @@ emitOMPWorksharingLoop(CIRGenFunction &cgf, const OMPLoopDirective &s,
     return mlir::failure();
   }
 
+  const ForStmt *innermost = getInnermostLoop(cgm, s, forStmt);
+  if (!innermost)
+    return mlir::failure();
+
+  // Non-rectangular nests need a per-iteration guard on these conditions.
+  for (const Expr *cond : s.finals_conditions()) {
+    if (cond) {
+      cgm.errorNYI(cond->getSourceRange(), "non-rectangular OpenMP loop nest");
+      return mlir::failure();
+    }
+  }
+
   // A `continue` lowers to cir.continue, which must be nested in a CIR loop,
   // and omp.loop_nest is not one.
   if (const ContinueStmt *continueStmt =
-          findLoopBodyContinue(forStmt->getBody())) {
+          findLoopBodyContinue(innermost->getBody())) {
     cgm.errorNYI(continueStmt->getSourceRange(),
                  "continue in an OpenMP loop body");
     return mlir::failure();
@@ -412,8 +445,8 @@ emitOMPWorksharingLoop(CIRGenFunction &cgf, const OMPLoopDirective &s,
     cgf.symbolTable.insert(vd, privAddr.getPointer());
   }
 
-  return emitOMPLoopNest(cgf, *forStmt, zero, tripCount, one, ivDecl,
-                         s.updates()[0]);
+  return emitOMPLoopNest(cgf, *forStmt, innermost->getBody(), zero, tripCount,
+                         one, ivDecl, s.updates());
 }
 
 mlir::LogicalResult

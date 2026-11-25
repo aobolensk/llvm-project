@@ -217,3 +217,47 @@ void emit_for_with_vars() {
 // LLVM-OGCG:       {{^}}[[PRECOND_END]]:
 // LLVM-OGCG:         call void @__kmpc_barrier(ptr {{.*}}, i32 %{{.*}})
 // LLVM-OGCG-NEXT:    ret void
+
+void emit_collapsed_for() {
+#pragma omp parallel
+  {
+#pragma omp for collapse(2)
+    for (int i = 0; i < 4; i++)
+      for (int j = 0; j < 8; j++)
+        during(i + j);
+  }
+}
+
+// LLVM-LABEL: define{{.*}} void @emit_collapsed_for()
+// LLVM:         call void (ptr, i32, ptr, ...) @__kmpc_fork_call(ptr {{.*}}, i32 0, ptr @[[COLLAPSED_OUTLINED:[^)]+]])
+
+// Both paths run one loop over the 4 * 8 collapsed iterations and recompute
+// i = iv / 8 and j = iv - (iv / 8) * 8 from its counter.
+//
+// LLVM-CIR:       define internal void @[[COLLAPSED_OUTLINED]](
+// LLVM-CIR:         select i1 %{{.*}}, i32 32, i32 0
+// LLVM-CIR:       {{^}}omp.loop_nest.region:
+// LLVM-CIR-NEXT:    store i32 %{{.*}}, ptr %[[IV:.*]], align 4
+// LLVM-CIR-NEXT:    %[[IV_I:.*]] = load i32, ptr %[[IV]], align 4
+
+// LLVM-OGCG:      define internal void @[[COLLAPSED_OUTLINED]](
+// LLVM-OGCG:        store i32 31, ptr %{{.*}}, align 4
+// LLVM-OGCG:      {{^}}omp.inner.for.body:
+// LLVM-OGCG-NEXT:   %[[IV_I:.*]] = load i32, ptr %[[IV:.*]], align 4
+
+// LLVM-NEXT:        %[[I_DIV:.*]] = sdiv i32 %[[IV_I]], 8
+// LLVM-NEXT:        %[[I_MUL:.*]] = mul nsw i32 %[[I_DIV]], 1
+// LLVM-NEXT:        %[[I_VAL:.*]] = add nsw i32 0, %[[I_MUL]]
+// LLVM-NEXT:        store i32 %[[I_VAL]], ptr %[[I:.*]], align 4
+// LLVM-NEXT:        %[[IV_J0:.*]] = load i32, ptr %[[IV]], align 4
+// LLVM-NEXT:        %[[IV_J1:.*]] = load i32, ptr %[[IV]], align 4
+// LLVM-NEXT:        %[[J_DIV:.*]] = sdiv i32 %[[IV_J1]], 8
+// LLVM-NEXT:        %[[J_MUL:.*]] = mul nsw i32 %[[J_DIV]], 8
+// LLVM-NEXT:        %[[J_SUB:.*]] = sub nsw i32 %[[IV_J0]], %[[J_MUL]]
+// LLVM-NEXT:        %[[J_MUL1:.*]] = mul nsw i32 %[[J_SUB]], 1
+// LLVM-NEXT:        %[[J_VAL:.*]] = add nsw i32 0, %[[J_MUL1]]
+// LLVM-NEXT:        store i32 %[[J_VAL]], ptr %[[J:.*]], align 4
+// LLVM-NEXT:        %[[I_LD:.*]] = load i32, ptr %[[I]], align 4
+// LLVM-NEXT:        %[[J_LD:.*]] = load i32, ptr %[[J]], align 4
+// LLVM-NEXT:        %[[SUM:.*]] = add nsw i32 %[[I_LD]], %[[J_LD]]
+// LLVM-NEXT:        call void @during(i32 noundef %[[SUM]])

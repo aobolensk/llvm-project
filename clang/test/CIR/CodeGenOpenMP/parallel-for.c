@@ -122,3 +122,43 @@ void parallel_for() {
 // LLVM-OGCG:         call void @during(i32
 // LLVM-OGCG:         call void @__kmpc_for_static_fini(ptr {{.*}}, i32 %[[TID2]])
 // LLVM-OGCG-NEXT:    ret void
+
+void parallel_for_collapse() {
+  // CIR-LABEL: cir.func{{.*}}@parallel_for_collapse
+#pragma omp parallel for collapse(2)
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 8; j++)
+      during(i + j);
+
+  // CIR: %[[IV_ALLOCA:.*]] = cir.alloca ".omp.iv" align(4) : !cir.ptr<!s32i>
+  // CIR: %[[I_ALLOCA:.*]] = cir.alloca "i" align(4) : !cir.ptr<!s32i>
+  // CIR: %[[J_ALLOCA:.*]] = cir.alloca "j" align(4) : !cir.ptr<!s32i>
+
+  // The collapsed trip count is the product of the two loop trip counts.
+  // CIR: %[[TC_PROD:.*]] = cir.mul nsw %{{.*}}, %{{.*}} : !s32i
+  // CIR-NEXT: %[[TC_ZERO:.*]] = cir.const #cir.int<0> : !s32i
+  // CIR-NEXT: %[[TRIPCOUNT_SEL:.*]] = cir.select if %{{.*}} then %[[TC_PROD]] else %[[TC_ZERO]] : (!cir.bool, !s32i, !s32i) -> !s32i
+  // CIR: %[[TRIPCOUNT:.*]] = cir.builtin_int_cast %[[TRIPCOUNT_SEL]] : !s32i -> i32
+
+  // A single loop_nest drives both private counters.
+  // CIR: omp.wsloop private(@{{.*}} %[[I_ALLOCA]] -> %[[I_PRIV:.*]], @{{.*}} %[[J_ALLOCA]] -> %[[J_PRIV:.*]] : !cir.ptr<!s32i>, !cir.ptr<!s32i>) {
+  // CIR-NEXT: omp.loop_nest (%[[IV:.*]]) : i32 = (%{{.*}}) to (%[[TRIPCOUNT]]) step (%{{.*}}) {
+  // CIR-NEXT: %[[IV_CIR:.*]] = cir.builtin_int_cast %[[IV]] : i32 -> !s32i
+  // CIR-NEXT: cir.store align(4) %[[IV_CIR]], %[[IV_ALLOCA]] : !s32i, !cir.ptr<!s32i>
+
+  // i = .omp.iv / 8
+  // CIR: %[[IV_I:.*]] = cir.load align(4) %[[IV_ALLOCA]] : !cir.ptr<!s32i>, !s32i
+  // CIR: %{{.*}} = cir.div %[[IV_I]], %{{.*}} : !s32i
+  // CIR: cir.store align(4) %{{.*}}, %[[I_PRIV]] : !s32i, !cir.ptr<!s32i>
+
+  // j = .omp.iv - (.omp.iv / 8) * 8
+  // CIR: %[[IV_J:.*]] = cir.load align(4) %[[IV_ALLOCA]] : !cir.ptr<!s32i>, !s32i
+  // CIR: %{{.*}} = cir.sub nsw %[[IV_J]], %{{.*}} : !s32i
+  // CIR: cir.store align(4) %{{.*}}, %[[J_PRIV]] : !s32i, !cir.ptr<!s32i>
+
+  // CIR-NEXT: %[[I_VAL:.*]] = cir.load align(4) %[[I_PRIV]] : !cir.ptr<!s32i>, !s32i
+  // CIR-NEXT: %[[J_VAL:.*]] = cir.load align(4) %[[J_PRIV]] : !cir.ptr<!s32i>, !s32i
+  // CIR-NEXT: %[[SUM:.*]] = cir.add nsw %[[I_VAL]], %[[J_VAL]] : !s32i
+  // CIR-NEXT: cir.call @during(%[[SUM]])
+  // CIR-NEXT: omp.yield
+}

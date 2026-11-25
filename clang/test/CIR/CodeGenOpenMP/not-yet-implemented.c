@@ -47,4 +47,30 @@ void loop_continue(int *a) {
       a[j] = i;
     }
   }
+
+  // With collapse, a continue that targets the innermost collapsed loop is not.
+#pragma omp for collapse(2)
+  for (int i = 0; i < 10; ++i) {
+    for (int j = 0; j < 10; ++j) {
+      // expected-error@+1{{ClangIR code gen Not Yet Implemented: continue in an OpenMP loop body}}
+      if (j == 3) continue;
+      a[j] = i;
+    }
+  }
+}
+
+void loop_collapse(int *a) {
+#pragma omp for collapse(2)
+  // expected-error@+1{{ClangIR code gen Not Yet Implemented: OpenMP loop nest that is not perfectly nested 'for' loops}}
+  for (int i = 0; i < 10; ++i) {
+    a[i] = 0;
+    for (int j = 0; j < 10; ++j)
+      a[j] = i;
+  }
+
+#pragma omp for collapse(2)
+  for (int i = 0; i < 10; ++i)
+    // expected-error@+1{{ClangIR code gen Not Yet Implemented: non-rectangular OpenMP loop nest}}
+    for (int j = i; j < 10; ++j)
+      a[j] = i;
 }
